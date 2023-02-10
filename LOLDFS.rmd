@@ -1,0 +1,256 @@
+---
+title: "LOLDFS.rmd"
+output: html_document
+date: "2023-01-11"
+---
+
+```{r setup, include=FALSE}
+
+library(lpSolve)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(coach)
+library(googlesheets4)
+library(R.utils)
+library(tm)
+library(caret)
+
+
+```
+
+
+
+### My optimizer
+```{r lpSolve-opto}
+# Parameters
+  testing <- F  
+
+  num_lineups <- 9
+  stack1size <- 4
+  stack2size <- 2
+  allow_gamestack <- F
+  core <- c("Peyz", "Deft", "Photic", "Gala", "Ruler")
+  cpt_positions <- c(core) # can include specific players or positions e.g. c("Betty", "Gumayusi", "MID")
+  num_core <- 1
+  # if you want to force TEAM in a certain construction, set one of these to TRUE; larger stack seems preferable
+  team_in_stack_1 <- F
+  team_in_stack_2 <- F
+  # if you want to force CPT in a certain construction, set one of these to TRUE; smaller stack seems preferable
+  cpt_in_stack_1 <- F
+  cpt_in_stack_2 <- F
+  
+  if(!testing){
+  projections <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
+    
+  projections$name <-as.character(projections$name)
+  projections$team <-as.character(projections$team)
+  projections$opp <-as.character(projections$opp)
+  
+  player_list <- projections$name %>%
+    unique()
+  team_list <- projections %>%
+    select(team, opp, win_pct, kill_total) %>%
+    unique()
+  }
+  pb <- txtProgressBar(0, num_lineups, style = 3)
+
+  
+  i <- 0
+  while(i < num_lineups){
+  
+  pick_stack <- team_list
+  
+  pick_stack$select <- runif(length(pick_stack$team), pick_stack$win_pct*pick_stack$kill_total, pick_stack$kill_total*1.2)
+  
+  pick_stack <- slice_max(pick_stack, order_by = select,n= 3)
+  
+  stack1 <- pick_stack$team[1]
+  if(pick_stack$team[2] == pick_stack$opp[1] & !allow_gamestack) {
+    stack2 <- pick_stack$team[3]
+  } else{
+    stack2 <- pick_stack$team[2]
+  }
+  
+  vstack1 <- as.numeric(projections$team == stack1)
+  vstack2 <- as.numeric(projections$team == stack2)
+  vsalary <- projections$salary
+  if(cpt_in_stack_2){
+  vcpt <- as.numeric(projections$lineup_position == "CPT" & projections$team == stack2 & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")
+  }else if (cpt_in_stack_1){
+  vcpt <- as.numeric(projections$lineup_position == "CPT" & projections$team == stack1 & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")    
+  } else {
+  vcpt <- as.numeric(projections$lineup_position == "CPT" & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")
+  }
+  vsup <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "SUP")
+  vadc <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "ADC")
+  vmid <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "MID")
+  vjng <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "JNG")
+  vtop <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TOP")
+  if(team_in_stack_1){
+  vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & projections$team == stack1)
+  } else if(team_in_stack_2){
+    vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & projections$team == stack2)
+  } else{
+    vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & !projections$opp == stack2 & !projections$opp == stack1)
+  }
+  vplayer <- c()
+  for(j in 1:length(player_list)){
+    this_player <- player_list[j]
+    this_vector <- as.numeric(projections$name == this_player)
+    vplayer <- c(vplayer, this_vector)
+  }
+  vcore <- as.numeric(projections$name %in% core)
+  
+  matrix_vector <- c(vsalary, vstack1, vstack2, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vcore, vplayer)
+  matrix_vector[is.na(matrix_vector)] <- 0
+  matrix_vector[is.infinite(matrix_vector)] <- 0
+  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(projections$salary), byrow = TRUE)
+  
+  ## Define constraints and direction - 50000 salary
+  const.rhs = c(50000,  stack1size, stack2size,   1,   1,   1,   1,   1,   1,   1, num_core)
+  const.dir = c( "<=",        "==",       "==","==","==","==","==","==","==","==", ">=")
+  
+  for(k in 1:length(player_list)){
+    const.rhs[length(const.rhs)+1] <- 1
+    const.dir[length(const.dir)+1] <- "<="
+  }
+  
+  objective.in <- rnorm(n = length(projections$kill_total), mean = projections$kill_total*projections$kp_pct*(vstack1+vstack2)*(1+vcpt/2), sd = projections$kill_total*projections$kp_pct*(vstack1+vstack2)*(1+vcpt/2)*.2)
+  
+  ### Optimize
+  objective.in[is.nan(objective.in)] <- 0
+  objective.in[objective.in < 0] <- 0
+  optimum = lp(direction = "max", objective.in, const.mat, const.dir, const.rhs, all.bin = TRUE)
+  projections$optimal <- optimum$solution
+  
+  lineup <- projections %>%
+    filter(optimal == 1)
+  
+  
+  lineup <- lineup[match(c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM"), lineup$lineup_position),]
+  
+  if(i==0){
+    lineups <- lineup$id
+    i <- 1
+  }else{
+    lineups <- as.data.frame(rbind(lineups, lineup$id)) %>%
+      unique()
+    lineups <- lineups[complete.cases(lineups),]
+    i <- length(lineups[,1])
+  }
+  
+  setTxtProgressBar(pb, i)
+  }
+  
+  close(pb)
+  colnames(lineups) <-c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM")
+  write.csv(lineups, "C:/Users/jorda/Downloads/DKLineupsLOL.csv", row.names = FALSE)
+
+  
+```
+
+### Lineup Editor
+```{r lineup-editor}
+### Build lineups above, then use this to edit entries for direct upload
+plineups <- read.csv("C:/Users/jorda/Downloads/DKEntriesLOL.csv")
+plineups <- filter(plineups, !is.na(Entry.ID) & !is.na(as.numeric(Entry.ID))) %>%
+  select(Entry.ID, Contest.Name, Contest.ID, Entry.Fee)
+newlineups <- read.csv("C:/Users/jorda/Downloads/DKLineupsLOL.csv")
+newlineups <- cbind(plineups, newlineups)
+colnames(newlineups) <- c("Entry ID", "Contest Name", "Contest ID", "Entry Fee", "CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM")
+write.csv(newlineups, "C:/Users/jorda/Downloads/DKEntriesLOL.csv", row.names = FALSE)
+```
+
+### Historic results
+```{r historic-results}
+
+historic_results <- read.csv("C:/Users/jorda/Downloads/Historic Results - LOL.csv")
+
+positions <- c("TEAM", "SUP", "ADC", "MID", "JNG", "TOP")
+
+list_of_actuals <- list()
+list_of_owns <- list()
+
+for(i in positions){
+
+  position_results <- historic_results %>%
+    filter(game_position == i)
+  
+lm_actual <- lm(Actual ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results)
+#summary(lm_actual)
+lm_own <- lm(Ownership ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results)
+#summary(lm_own)
+
+list_of_actuals[[length(list_of_actuals)+1]] <-  lm_actual
+list_of_owns[[length(list_of_owns)+1]]<- lm_own
+
+
+}
+
+```
+
+### predictions
+```{r predictions}
+
+
+  projections <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
+
+projections <- filter(projections, !lineup_position == "CPT")
+
+positions <- c("TEAM", "SUP", "ADC", "MID", "JNG", "TOP")
+
+preds <- data.frame(colnames(projections), "Projection", "Ownership")
+
+for(i in 1:6){
+  
+  this_position <- projections %>%
+    filter(game_position == positions[i])
+  
+  this_position$Projection <- predict(list_of_actuals[[i]], this_position)
+  this_position$Ownership <- predict(list_of_owns[[i]], this_position)
+  
+  #this_position <- select(name, Projection, Ownership)
+  if(i == 1){
+    preds <- this_position
+  } else{
+  preds <- rbind(preds, this_position)
+  }
+  
+  
+}
+
+```
+
+
+### K-fold CV
+```{r kfold-cv}
+
+historic_results <- read.csv("C:/Users/jorda/Downloads/Historic Results - LOL.csv")
+
+positions <- c("TEAM", "SUP", "ADC", "MID", "JNG", "TOP")
+
+list_of_actuals <- list()
+list_of_owns <- list()
+
+for(i in positions){
+
+  position_results <- historic_results %>%
+    filter(game_position == i)
+  
+ctrl <- trainControl(method = "cv", number = 5)
+
+lm_actual <- train(Actual ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results, method = "lm", trControl = ctrl)
+lm_own <- train(Ownership ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results, method = "lm", trControl = ctrl)
+
+list_of_actuals[[length(list_of_actuals)+1]] <-  lm_actual
+list_of_owns[[length(list_of_owns)+1]]<- lm_own
+
+
+}
+
+
+```
