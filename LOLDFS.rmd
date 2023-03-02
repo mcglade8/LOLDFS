@@ -26,13 +26,16 @@ library(caret)
 # Parameters
   testing <- F  
 
-  num_lineups <- 9
+  num_lineups <- 20
   stack1size <- 4
   stack2size <- 2
   allow_gamestack <- F
-  core <- c("Peyz", "Deft", "Photic", "Gala", "Ruler")
-  cpt_positions <- c(core) # can include specific players or positions e.g. c("Betty", "Gumayusi", "MID")
-  num_core <- 1
+  core <- NULL
+  fade <- c("DRX", "KDF")
+  cpt_positions <- c("Dream", "Hope", "Photic", "Shanks") # can include specific players or positions e.g. c("Betty", "Gumayusi", "MID")
+  num_core <- 0
+  max_fade <- 0 #max allowed from fades
+  
   # if you want to force TEAM in a certain construction, set one of these to TRUE; larger stack seems preferable
   team_in_stack_1 <- F
   team_in_stack_2 <- F
@@ -41,15 +44,15 @@ library(caret)
   cpt_in_stack_2 <- F
   
   if(!testing){
-  projections <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
+  data <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
     
-  projections$name <-as.character(projections$name)
-  projections$team <-as.character(projections$team)
-  projections$opp <-as.character(projections$opp)
+  data$name <-as.character(data$name)
+  data$team <-as.character(data$team)
+  data$opp <-as.character(data$opp)
   
-  player_list <- projections$name %>%
+  player_list <- data$name %>%
     unique()
-  team_list <- projections %>%
+  team_list <- data %>%
     select(team, opp, win_pct, kill_total) %>%
     unique()
   }
@@ -72,62 +75,65 @@ library(caret)
     stack2 <- pick_stack$team[2]
   }
   
-  vstack1 <- as.numeric(projections$team == stack1)
-  vstack2 <- as.numeric(projections$team == stack2)
-  vsalary <- projections$salary
+  vstack1 <- as.numeric(data$team == stack1)
+  vstack2 <- as.numeric(data$team == stack2)
+  vsalary <- data$salary
   if(cpt_in_stack_2){
-  vcpt <- as.numeric(projections$lineup_position == "CPT" & projections$team == stack2 & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")
+  vcpt <- as.numeric(data$lineup_position == "CPT" & data$team == stack2 & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")
   }else if (cpt_in_stack_1){
-  vcpt <- as.numeric(projections$lineup_position == "CPT" & projections$team == stack1 & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")    
+  vcpt <- as.numeric(data$lineup_position == "CPT" & data$team == stack1 & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")    
   } else {
-  vcpt <- as.numeric(projections$lineup_position == "CPT" & (projections$game_position %in% cpt_positions | projections$name %in% cpt_positions) | projections$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!projections$game_position == "TEAM")
+  vcpt <- as.numeric(data$lineup_position == "CPT" & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
+  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")
   }
-  vsup <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "SUP")
-  vadc <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "ADC")
-  vmid <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "MID")
-  vjng <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "JNG")
-  vtop <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TOP")
+  vsup <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "SUP")
+  vadc <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "ADC")
+  vmid <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "MID")
+  vjng <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "JNG")
+  vtop <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TOP")
   if(team_in_stack_1){
-  vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & projections$team == stack1)
+  vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & data$team == stack1)
   } else if(team_in_stack_2){
-    vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & projections$team == stack2)
+    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & data$team == stack2)
+  } else if(stack1size + stack2size == 6){
+    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & !data$opp == stack1 & !data$opp == stack2 & !data$team == stack1 & !data$team == stack2 )  
   } else{
-    vteampos <- as.numeric(projections$lineup_position != "CPT" & projections$lineup_position == "TEAM" & !projections$opp == stack2 & !projections$opp == stack1)
+    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & !data$opp == stack2 & !data$opp == stack1)
   }
   vplayer <- c()
   for(j in 1:length(player_list)){
     this_player <- player_list[j]
-    this_vector <- as.numeric(projections$name == this_player)
+    this_vector <- as.numeric(data$name == this_player & !data$opp %in% c(stack1, stack2))
     vplayer <- c(vplayer, this_vector)
   }
-  vcore <- as.numeric(projections$name %in% core)
+  vcore <- as.numeric(data$name %in% core | data$team %in% core)
+  vfade <- as.numeric(data$name %in% fade | data$team %in% fade)
   
-  matrix_vector <- c(vsalary, vstack1, vstack2, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vcore, vplayer)
+  matrix_vector <- c(vsalary, vstack1, vstack2, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vcore, vfade, vplayer)
   matrix_vector[is.na(matrix_vector)] <- 0
   matrix_vector[is.infinite(matrix_vector)] <- 0
-  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(projections$salary), byrow = TRUE)
+  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(data$salary), byrow = TRUE)
   
   ## Define constraints and direction - 50000 salary
-  const.rhs = c(50000,  stack1size, stack2size,   1,   1,   1,   1,   1,   1,   1, num_core)
-  const.dir = c( "<=",        "==",       "==","==","==","==","==","==","==","==", ">=")
+  const.rhs = c(50000,  stack1size, stack2size,   1,   1,   1,   1,   1,   1,   1, num_core, max_fade)
+  const.dir = c( "<=",        "==",       "==","==","==","==","==","==","==","==", ">=", "<=")
   
   for(k in 1:length(player_list)){
     const.rhs[length(const.rhs)+1] <- 1
     const.dir[length(const.dir)+1] <- "<="
   }
   
-  objective.in <- rnorm(n = length(projections$kill_total), mean = projections$kill_total*projections$kp_pct*(vstack1+vstack2)*(1+vcpt/2), sd = projections$kill_total*projections$kp_pct*(vstack1+vstack2)*(1+vcpt/2)*.2)
+  objective.in <- rnorm(n = length(data$kill_total), mean = data$kill_total*data$kp_pct*(vstack1+vstack2)*(1+vcpt/2), sd = data$kill_total*data$kp_pct*(vstack1+vstack2)*(1+vcpt/2)*.2)
   
   ### Optimize
   objective.in[is.nan(objective.in)] <- 0
   objective.in[objective.in < 0] <- 0
   optimum = lp(direction = "max", objective.in, const.mat, const.dir, const.rhs, all.bin = TRUE)
-  projections$optimal <- optimum$solution
+  data$optimal <- optimum$solution
   
-  lineup <- projections %>%
+  lineup <- data %>%
     filter(optimal == 1)
   
   
@@ -199,8 +205,10 @@ list_of_owns[[length(list_of_owns)+1]]<- lm_own
 
   projections <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
 
-projections <- filter(projections, !lineup_position == "CPT")
+projections <- filter(projections, !lineup_position == "CPT") %>%
+    mutate(big_fav = as.numeric(win_pct >= .67), big_dog = as.numeric(win_pct <= .33), LPL = as.numeric(League == "LPL"), LCK = as.numeric(League == "LCK"), LCS = as.numeric(League == "LCS"))
 
+if(separate_by_positions){
 positions <- c("TEAM", "SUP", "ADC", "MID", "JNG", "TOP")
 
 preds <- data.frame(colnames(projections), "Projection", "Ownership")
@@ -210,8 +218,11 @@ for(i in 1:6){
   this_position <- projections %>%
     filter(game_position == positions[i])
   
-  this_position$Projection <- predict(list_of_actuals[[i]], this_position)
-  this_position$Ownership <- predict(list_of_owns[[i]], this_position)
+  this_model <- list_of_actuals[[i]]
+  this_own_model <- list_of_owns[[i]]
+  #summary(this_model)
+  this_position$own_proj <- predict(this_own_model, this_position)
+  this_position$Projection <- predict(this_model, this_position)
   
   #this_position <- select(name, Projection, Ownership)
   if(i == 1){
@@ -222,7 +233,20 @@ for(i in 1:6){
   
   
 }
+projections <- preds
+} else{
+  projections$own_proj <- predict(lm_own, projections)
 
+  projections$Projection <- predict(lm_actual, projections)
+  projections$test <- (projections$Projection + sqrt(projections$own_proj)*100)/2
+}
+
+rec_core <- unlist(projections$name[which(projections$Projection > mid_cutoff)])
+rec_fade <-unlist(projections$name[which(projections$Projection < bottom_cutoff)])
+
+projections$optimal <- predict(opt_lm, projections)
+
+projections$leverage <- (projections$optimal-projections$own_proj)
 ```
 
 
@@ -231,26 +255,204 @@ for(i in 1:6){
 
 historic_results <- read.csv("C:/Users/jorda/Downloads/Historic Results - LOL.csv")
 
+#Only pick 0-1 of these
+separate_by_positions <- T
+separate_by_win_pct <- F
+
+if(separate_by_positions){
 positions <- c("TEAM", "SUP", "ADC", "MID", "JNG", "TOP")
 
 list_of_actuals <- list()
 list_of_owns <- list()
 
+comparison <- NULL
 for(i in positions){
 
-  position_results <- historic_results %>%
-    filter(game_position == i)
-  
-ctrl <- trainControl(method = "cv", number = 5)
+    position_results <- historic_results %>%
+    filter(game_position == i) %>%
+    mutate(big_fav = as.numeric(win_pct >= .67), big_dog = as.numeric(win_pct <= .33), LPL = as.numeric(League == "LPL"), LCK = as.numeric(League == "LCK"), LCS = as.numeric(League == "LCS"))
 
-lm_actual <- train(Actual ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results, method = "lm", trControl = ctrl)
-lm_own <- train(Ownership ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results, method = "lm", trControl = ctrl)
+  ctrl <- trainControl(method = "cv", number = 5)
+
+lm_own <- train(Ownership ~ win_pct * slate_games + big_fav + big_dog + sqrt(salary) + LPL + LCK + LCS, data = position_results, method = "lm", trControl = ctrl)
+position_results$own_proj <- predict(lm_own, position_results)
+
+lm_actual <- train(Actual ~ sqrt(salary) + win_pct + kill_total + kp_pct + big_fav + big_dog + LPL + LCK + LCS, data = position_results, method = "lm", trControl = ctrl)
+position_results$projection <- predict(lm_actual, position_results)
 
 list_of_actuals[[length(list_of_actuals)+1]] <-  lm_actual
 list_of_owns[[length(list_of_owns)+1]]<- lm_own
 
 
+if(i == "TEAM"){
+comparison <- position_results
+  
+}else{
+  comparison <- rbind(comparison, position_results)
 }
+
+}
+
+ggplot(comparison) +
+  geom_point(aes(projection, Actual), color = "blue") +
+  geom_smooth(aes(projection, Actual), color = "blue") #+
+  # geom_point(aes(own_proj*100, Ownership*100), color = "red")+
+  # geom_smooth(aes(own_proj*100, Ownership*100), color = "red")+
+  # geom_point(aes(salary/100, Actual), color = "green") +
+  # geom_smooth(aes(salary/100, Actual), color = "green")
+
+}else if(separate_by_win_pct){
+  ctrl <- trainControl(method = "cv", number = 5)
+  
+  dogs <- historic_results %>%
+    filter(win_pct < .5)
+  favs <-  historic_results %>%
+    filter(win_pct > .5)
+  
+  lm_own_dog <- train(Ownership ~ win_pct + kp_pct, data = dogs, method = "lm", trControl = ctrl)
+  dogs$ProjOwnership <- predict(lm_own_dog, dogs)
+
+  dogs <- as.data.frame(dogs)
+  
+  lm_actual_dog <- train(Actual ~ salary + win_pct + sqrt(ProjOwnership) + kp_pct, data = dogs, method = "lm", trControl = ctrl, na.action = na.pass)
+  
+  dogs$Projection <- predict(lm_actual_dog, dogs, na.action = na.pass)
+  
+  lm_own_favs <- train(Ownership ~ win_pct + kp_pct, data = favs, method = "lm", trControl = ctrl)
+  favs$ProjOwnership <- predict(lm_own_favs, favs)
+
+  favs <- as.data.frame(favs)
+  
+  lm_actual_favs <- train(Actual ~ salary + win_pct + sqrt(ProjOwnership) + kp_pct, data = favs, method = "lm", trControl = ctrl, na.action = na.pass)
+  favs$Projection <- predict(lm_actual_favs, favs, na.action = na.pass)
+  
+  ggplot() + 
+    geom_point(data = dogs, aes(Projection, Actual), colour= "blue") + 
+    geom_smooth(data = dogs,method = lm, aes(Projection, Actual), colour= "blue")+
+    geom_point(data = favs, aes(Projection, Actual), colour= "red") + 
+    geom_smooth(data = favs,method = lm, aes(Projection, Actual), colour= "red")
+  
+}else{
+  
+ctrl <- trainControl(method = "cv", number = 5)
+
+lm_own <- train(Ownership ~ win_pct + kp_pct, data = historic_results, method = "lm", trControl = ctrl, na.action = na.pass)
+historic_results$ProjOwnership <- predict(lm_own, historic_results, na.action = na.pass)
+
+lm_actual <- train(Actual ~ salary + win_pct + ProjOwnership + kp_pct, data = historic_results, method = "lm", trControl = ctrl, na.action = na.pass)
+
+historic_results$Projection <- predict(lm_actual, historic_results, na.action = na.pass)
+
+ggplot(historic_results) +
+  geom_point(aes((Projection + sqrt(Ownership)*100)/2, Actual), colour= "blue") +
+  geom_smooth(method = lm, aes((Projection + sqrt(Ownership)*100)/2, Actual), colour= "blue")+
+  #geom_point(aes(ProjOwnership*100, Ownership*100), colour = "red") +
+  geom_point(aes(Projection, sqrt(Ownership)*100), colour = "green")+
+  geom_smooth(method = lm, aes(Projection, sqrt(Ownership)*100), colour = "green")
+
+}
+
+summary(lm_actual)
+summary(lm_own)
+
 
 
 ```
+
+### Break up projections
+```{r break-up-proj}
+
+fps_needed <- 80
+bottom_cutoff <- 50
+mid_cutoff <- 69
+
+
+bottom_tier <- comparison %>%
+  filter(projection < bottom_cutoff, !lineup_position == "TEAM") %>%
+  summarise(Projection = mean(Actual), sd_fps = sd(Actual), own_proj = mean(Ownership), kp_pct = mean(kp_pct), kill_total = mean(kill_total), win_pct = mean(win_pct)) %>%
+  mutate(optimal = pnorm(fps_needed, mean = Projection, sd = sd_fps, lower.tail = FALSE))
+
+mid <- comparison %>%
+  filter(projection >= bottom_cutoff, projection < mid_cutoff, !lineup_position == "TEAM") %>%
+  summarise(Projection = mean(Actual), sd_fps = sd(Actual), own_proj = mean(Ownership), kp_pct = mean(kp_pct), kill_total = mean(kill_total), win_pct = mean(win_pct)) %>%
+  mutate(optimal = pnorm(fps_needed, mean = Projection, sd = sd_fps, lower.tail = FALSE))
+
+top_tier <- comparison %>%
+  filter(projection >= mid_cutoff, !lineup_position == "TEAM") %>%
+  summarise(Projection = mean(Actual), sd_fps = sd(Actual), own_proj = mean(Ownership), kp_pct = mean(kp_pct), kill_total = mean(kill_total), win_pct = mean(win_pct)) %>%
+  mutate(optimal = pnorm(fps_needed, mean = Projection, sd = sd_fps, lower.tail = FALSE))
+
+tiered_proj <- rbind(bottom_tier, mid, top_tier)
+
+opt_lm <- lm(optimal ~ Projection, data = tiered_proj)
+summary(opt_lm)
+```
+
+
+### Exact optimal with implied projections
+```{r exact-lineup}
+
+teams <- unique(projections$team)
+
+fade_teams <- c("WE")
+cpt_teams <- teams
+
+flex <- projections %>%
+  select(name, game_position, lineup_position, salary, Projection, team, opp)
+
+cpt <- flex %>%
+  mutate(salary = salary*1.5, Projection = Projection*1.5, lineup_position = "CPT")
+
+data <- rbind(flex, cpt) %>%
+  mutate(Projection = as.numeric(Projection))
+
+player_list <- projections$name %>%
+    unique()
+
+  vsalary <- data$salary
+  vcpt <- as.numeric(data$lineup_position == "CPT" & !data$game_position == "TEAM" & data$game_position %in% c("MID", "ADC") & data$team %in% cpt_teams)
+  vsup <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "SUP")
+  vadc <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "ADC")
+  vmid <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "MID")
+  vjng <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "JNG")
+  vtop <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TOP")
+  vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM")
+  vfades <- as.numeric(data$team %in% fade_teams)
+  vplayer <- c()
+  for(j in 1:length(player_list)){
+    this_player <- player_list[j]
+    this_vector <- as.numeric(data$name == this_player)
+    vplayer <- c(vplayer, this_vector)
+  }
+  vlineupsize <- integer(length(vsalary))+1
+  
+  matrix_vector <- c(vsalary, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vlineupsize, vfades, vplayer)
+  matrix_vector[is.na(matrix_vector)] <- 0
+  matrix_vector[is.infinite(matrix_vector)] <- 0
+  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(data$salary), byrow = TRUE)
+  
+  ## Define constraints and direction - 50000 salary
+  const.rhs = c(50000,    1,   1,   1,   1,   1,   1,   1,   7,   0)
+  const.dir = c( "<=", "==","==","==","==","==","==","==","==","==")
+  
+  for(k in 1:length(player_list)){
+    const.rhs[length(const.rhs)+1] <-    1
+    const.dir[length(const.dir)+1] <- "<="
+  }
+  
+  objective.in <- rnorm(nrow(data), data$Projection, 0)
+  
+  ### Optimize
+  optimum = lp(direction = "max", objective.in, const.mat, const.dir, const.rhs, all.bin = TRUE)
+  data$optimal <- optimum$solution
+  
+  lineup <- data %>%
+    filter(optimal == 1)
+  
+  
+  lineup <- lineup[match(c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM"), lineup$lineup_position),]
+  
+  
+
+```
+
