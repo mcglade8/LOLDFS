@@ -15,7 +15,10 @@ library(googlesheets4)
 library(R.utils)
 library(tm)
 library(caret)
-
+library(httr)
+library(jsonlite)
+library(XML)
+library(lubridate)
 
 ```
 
@@ -26,15 +29,17 @@ library(caret)
 # Parameters
   testing <- F  
 
-  num_lineups <- 20
+### Run bottom two functions (possibly game logs also) prior to building
+
+  num_lineups <-20
   stack1size <- 4
   stack2size <- 2
   allow_gamestack <- F
-  core <- NULL
-  fade <- c("DRX", "KDF")
-  cpt_positions <- c("Dream", "Hope", "Photic", "Shanks") # can include specific players or positions e.g. c("Betty", "Gumayusi", "MID")
+  core <- NULL#c("TES", "LNG", "BRO")
+  fade <- c("Hanwha Life Esports", "Kwangdong Freecs", "Anyone's Legend", "Ultra Prime")
+  cpt_positions <- c("ADC", "MID", "JNG") # can include specific players or positions e.g. c("Betty", "Gumayusi", "MID")
   num_core <- 0
-  max_fade <- 0 #max allowed from fades
+  num_fade <- 0 #max allowed from fades
   
   # if you want to force TEAM in a certain construction, set one of these to TRUE; larger stack seems preferable
   team_in_stack_1 <- F
@@ -43,107 +48,142 @@ library(caret)
   cpt_in_stack_1 <- F
   cpt_in_stack_2 <- F
   
-  if(!testing){
-  data <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
-    
-  data$name <-as.character(data$name)
-  data$team <-as.character(data$team)
-  data$opp <-as.character(data$opp)
-  
-  player_list <- data$name %>%
-    unique()
-  team_list <- data %>%
-    select(team, opp, win_pct, kill_total) %>%
-    unique()
-  }
   pb <- txtProgressBar(0, num_lineups, style = 3)
+  oprojections <- read.csv("C:/Users/jorda/Downloads/DKSalariesLOL.csv")
+  projections <- save
+  cpt <- oprojections %>%
+    filter(Roster.Position == "CPT") %>%
+    mutate(Player = gsub(" ", "", Name)) %>%
+    select(Player, ID, Roster.Position, Salary) %>%
+    rename(salary = Salary)
+  
+  team_list <- oprojections %>%
+    filter(Roster.Position == "TEAM") %>%
+    mutate(Team = trim(Name)) %>%
+    select(Team, Name, ID, Salary, Position, Roster.Position) %>%
+    rename(salary = Salary, Player = Name) %>%
+    mutate(Team = sub("BRION", "Fredit BRION", Team))
+  
+  team_proj_for_merge <- projections %>%
+    group_by(Team) %>%
+    slice(1) %>%
+    ungroup() %>%
+    select(-Player, -ID, -salary, -Position, - Roster.Position)
+
+  team_list <- merge(team_list, team_proj_for_merge)
+  # team_list <- team_list[order(team_list$Team),]
+  # team_proj_for_merge <- team_proj_for_merge[order(team_proj_for_merge$Team),]
+  
+  team_list$DKfpts <- 0
+  team_list$DK_w_loss <- 0
+  team_list$DK_w_win <- 0
+  
+  fix_player <- NULL# c("Ivory")
+  fix_mean <- NULL#c(18)
+  if(!is.null(fix_player)){
+  for(p in 1:length(fix_player)){
+    projections$DKfpts <- case_when(projections$Player==fix_player[p] ~ fix_mean[p], T ~ projections$DKfpts)
+    projections$DK_w_loss <- case_when(projections$Player==fix_player[p] ~ fix_mean[p], T ~ projections$DKfpts)-10
+    projections$DK_w_win <- case_when(projections$Player==fix_player[p] ~ fix_mean[p], T ~ projections$DKfpts)+10
+
+  }
+  }
+  cpt <- merge(cpt, select(projections, -ID, -salary, - Roster.Position), all = T)
+  
+  projections <- rbind(projections, cpt) %>%
+    rbind(team_list)
+  projections <- filter(projections, !is.na(Position))
+  cpt <- as.numeric(projections$Roster.Position == "CPT")*.5+1  
+  team_score <- rep(0, nrow(projections))
+  for(i in 1:nrow(projections)){
+    if(projections$Position[i] == "TEAM"){
+      t <- projections$Team[i]
+      s <- team_wins$Wins[which(team_wins$Team == t)]
+      
+      team_score[i] <- s
+    }
+  }
+  
+  projections[is.na(projections)] <- 0
+  projections$DKfpts <- (projections$DKfpts + team_score*50)*cpt
+  projections$DK_w_loss <- (projections$DK_w_loss + team_score*25)*cpt
+  projections$DK_w_win <- (projections$DK_w_win + team_score*75)*cpt
+  #projections <- merge(projections, find_ev)
+  player_list <- unique(projections$Player)
+  #cpt_proj <- select(projections, -Player, - ID, -Roster.Position, -salary)
 
   
   i <- 0
   while(i < num_lineups){
   
-  pick_stack <- team_list
+  pick_stack <- sample(projections$Team, 1, prob = projections$percent_optimal)
+  stack_opp <- projections$Vs[which(projections$Team==pick_stack)][1]
   
-  pick_stack$select <- runif(length(pick_stack$team), pick_stack$win_pct*pick_stack$kill_total, pick_stack$kill_total*1.2)
-  
-  pick_stack <- slice_max(pick_stack, order_by = select,n= 3)
-  
-  stack1 <- pick_stack$team[1]
-  if(pick_stack$team[2] == pick_stack$opp[1] & !allow_gamestack) {
-    stack2 <- pick_stack$team[3]
-  } else{
-    stack2 <- pick_stack$team[2]
+  stack_2 <- stack_opp
+  while(stack_2==stack_opp || stack_2 == pick_stack){
+    stack_2 <- sample(projections$Team, 1, prob = projections$percent_optimal)
   }
+  stack2opp <- projections$Vs[which(projections$Team==stack_2)][1]
+  if(allow_gamestack){
+    vopposition <- rep(0, nrow(projections))
+  }else{
+    vopposition <- as.numeric(projections$Team %in% c(stack_opp, stack2opp))
+  }
+  vstack1 <- as.numeric(projections$Team == pick_stack)
+  vstack2 <- as.numeric(projections$Team == stack_2)
+  vsalary <- projections$salary
+  vcpt <- as.numeric(projections$Roster.Position == "CPT") * as.numeric(as.numeric(projections$Position %in% cpt_positions) + as.numeric(projections$Player %in% cpt_positions) + as.numeric(projections$Team %in% cpt_positions) > 0)
+  vcpt <- vcpt * as.numeric(!projections$Position == "TEAM")
+  if(cpt_in_stack_1) vcpt <- vcpt * as.numeric(projections$Team== pick_stack)
+  vsup <- as.numeric(projections$Roster.Position != "CPT" & projections$Roster.Position == "SUP")
+  vadc <- as.numeric(projections$Roster.Position != "CPT" & projections$Roster.Position == "ADC")
+  vmid <- as.numeric(projections$Roster.Position != "CPT" & projections$Roster.Position == "MID")
+  vjng <- as.numeric(projections$Roster.Position != "CPT" & projections$Roster.Position == "JNG")
+  vtop <- as.numeric(projections$Roster.Position != "CPT" & projections$Roster.Position == "TOP")
+  vteampos <- as.numeric(projections$Position == "TEAM")
   
-  vstack1 <- as.numeric(data$team == stack1)
-  vstack2 <- as.numeric(data$team == stack2)
-  vsalary <- data$salary
-  if(cpt_in_stack_2){
-  vcpt <- as.numeric(data$lineup_position == "CPT" & data$team == stack2 & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")
-  }else if (cpt_in_stack_1){
-  vcpt <- as.numeric(data$lineup_position == "CPT" & data$team == stack1 & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")    
-  } else {
-  vcpt <- as.numeric(data$lineup_position == "CPT" & (data$game_position %in% cpt_positions | data$name %in% cpt_positions) | data$team %in% cpt_positions)
-  vcpt <- vcpt * as.numeric(!data$game_position == "TEAM")
-  }
-  vsup <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "SUP")
-  vadc <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "ADC")
-  vmid <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "MID")
-  vjng <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "JNG")
-  vtop <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TOP")
-  if(team_in_stack_1){
-  vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & data$team == stack1)
-  } else if(team_in_stack_2){
-    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & data$team == stack2)
-  } else if(stack1size + stack2size == 6){
-    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & !data$opp == stack1 & !data$opp == stack2 & !data$team == stack1 & !data$team == stack2 )  
-  } else{
-    vteampos <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "TEAM" & !data$opp == stack2 & !data$opp == stack1)
-  }
   vplayer <- c()
   for(j in 1:length(player_list)){
     this_player <- player_list[j]
-    this_vector <- as.numeric(data$name == this_player & !data$opp %in% c(stack1, stack2))
+    this_vector <- as.numeric(projections$Player == this_player & !projections$Vs %in% c(stack1, stack2))
     vplayer <- c(vplayer, this_vector)
   }
-  vcore <- as.numeric(data$name %in% core | data$team %in% core)
-  vfade <- as.numeric(data$name %in% fade | data$team %in% fade)
-  
-  matrix_vector <- c(vsalary, vstack1, vstack2, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vcore, vfade, vplayer)
+  # vcore <- as.numeric(projections$Player %in% core | projections$Team %in% core)
+  vfade <- as.numeric(projections$Player %in% fade) +  as.numeric(projections$Team %in% fade)
+  # 
+  matrix_vector <- c(vsalary, vstack1, vstack2, vcpt, vsup, vadc, vmid, vjng, vtop, vteampos, vopposition, vfade, vplayer)
   matrix_vector[is.na(matrix_vector)] <- 0
   matrix_vector[is.infinite(matrix_vector)] <- 0
-  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(data$salary), byrow = TRUE)
+  const.mat = matrix(matrix_vector, nrow = length(matrix_vector)/length(projections$salary), byrow = TRUE)
   
   ## Define constraints and direction - 50000 salary
-  const.rhs = c(50000,  stack1size, stack2size,   1,   1,   1,   1,   1,   1,   1, num_core, max_fade)
-  const.dir = c( "<=",        "==",       "==","==","==","==","==","==","==","==", ">=", "<=")
+  const.rhs = c(50000,  stack1size, stack2size,   1,   1,   1,   1,   1,   1,   1,    0, num_fade)
+  const.dir = c( "<=",        "==",       ">=","==","==","==","==","==","==","==", "==", "<=")
   
   for(k in 1:length(player_list)){
     const.rhs[length(const.rhs)+1] <- 1
     const.dir[length(const.dir)+1] <- "<="
   }
   
-  objective.in <- rnorm(n = length(data$kill_total), mean = data$kill_total*data$kp_pct*(vstack1+vstack2)*(1+vcpt/2), sd = data$kill_total*data$kp_pct*(vstack1+vstack2)*(1+vcpt/2)*.2)
+  objective.in <- rnorm(n = nrow(projections), mean = projections$DKfpts, sd = projections$win_pct*10)
   
   ### Optimize
   objective.in[is.nan(objective.in)] <- 0
-  objective.in[objective.in < 0] <- 0
+  #objective.in[objective.in < 0] <- 0
   optimum = lp(direction = "max", objective.in, const.mat, const.dir, const.rhs, all.bin = TRUE)
-  data$optimal <- optimum$solution
+  projections$optimal <- optimum$solution
   
-  lineup <- data %>%
+  lineup <- projections %>%
     filter(optimal == 1)
   
   
-  lineup <- lineup[match(c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM"), lineup$lineup_position),]
+  lineup <- lineup[match(c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM"), lineup$Roster.Position),]
   
   if(i==0){
-    lineups <- lineup$id
+    lineups <- lineup$ID
     i <- 1
   }else{
-    lineups <- as.data.frame(rbind(lineups, lineup$id)) %>%
+    lineups <- as.data.frame(rbind(lineups, lineup$ID)) %>%
       unique()
     lineups <- lineups[complete.cases(lineups),]
     i <- length(lineups[,1])
@@ -153,6 +193,18 @@ library(caret)
   }
   
   close(pb)
+  
+  
+ownership <- projections %>%
+  select(Player, ID, Roster.Position, Team)
+ownership$ownership_pct <- 0
+
+for(i in 1:nrow(ownership)){
+  ownership$ownership_pct[i] = sum(lineups == ownership$ID[i])
+}
+ownership$ownership_pct <- ownership$ownership_pct/ length(lineups[,1])*100
+
+  
   colnames(lineups) <-c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM")
   write.csv(lineups, "C:/Users/jorda/Downloads/DKLineupsLOL.csv", row.names = FALSE)
 
@@ -186,9 +238,9 @@ for(i in positions){
   position_results <- historic_results %>%
     filter(game_position == i)
   
-lm_actual <- lm(Actual ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results)
+lm_actual <- lm(Actual ~ salary + win_pct + kill_total + kp_pct + slate_games, projections = position_results)
 #summary(lm_actual)
-lm_own <- lm(Ownership ~ salary + win_pct + kill_total + kp_pct + slate_games, data = position_results)
+lm_own <- lm(Ownership ~ salary + win_pct + kill_total + kp_pct + slate_games, projections = position_results)
 #summary(lm_own)
 
 list_of_actuals[[length(list_of_actuals)+1]] <-  lm_actual
@@ -267,10 +319,10 @@ list_of_owns <- list()
 
 comparison <- NULL
 for(i in positions){
-
+    i = "TEAM"
     position_results <- historic_results %>%
     filter(game_position == i) %>%
-    mutate(big_fav = as.numeric(win_pct >= .67), big_dog = as.numeric(win_pct <= .33), LPL = as.numeric(League == "LPL"), LCK = as.numeric(League == "LCK"), LCS = as.numeric(League == "LCS"))
+    mutate(big_fav = as.numeric(win_pct >= .67), big_dog = as.numeric(win_pct <= .33), LPL = as.numeric(League == "LPL"), LCK = as.numeric(League == "LCK"), LCS = as.numeric(League == "LCS"), Ownership = as.numeric(gsub(".*?([0-9]+).*$", "\\1", gsub("%", "", Ownership))))
 
   ctrl <- trainControl(method = "cv", number = 5)
 
@@ -363,8 +415,8 @@ summary(lm_own)
 ```{r break-up-proj}
 
 fps_needed <- 80
-bottom_cutoff <- 50
-mid_cutoff <- 69
+bottom_cutoff <- 51
+mid_cutoff <- 72
 
 
 bottom_tier <- comparison %>%
@@ -394,8 +446,8 @@ summary(opt_lm)
 
 teams <- unique(projections$team)
 
-fade_teams <- c("WE")
-cpt_teams <- teams
+fade_teams <- NULL#c("UP")
+cpt_teams <- c("LGD", "NIP", "IG", "EDG")
 
 flex <- projections %>%
   select(name, game_position, lineup_position, salary, Projection, team, opp)
@@ -410,7 +462,7 @@ player_list <- projections$name %>%
     unique()
 
   vsalary <- data$salary
-  vcpt <- as.numeric(data$lineup_position == "CPT" & !data$game_position == "TEAM" & data$game_position %in% c("MID", "ADC") & data$team %in% cpt_teams)
+  vcpt <- as.numeric(data$lineup_position == "CPT" & !data$game_position == "TEAM" & data$game_position %in% c( "ADC", "MID", "JNG") & data$team %in% cpt_teams)
   vsup <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "SUP")
   vadc <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "ADC")
   vmid <- as.numeric(data$lineup_position != "CPT" & data$lineup_position == "MID")
@@ -420,7 +472,7 @@ player_list <- projections$name %>%
   vfades <- as.numeric(data$team %in% fade_teams)
   vplayer <- c()
   for(j in 1:length(player_list)){
-    this_player <- player_list[j]
+    this_player <- player_list[[j]]
     this_vector <- as.numeric(data$name == this_player)
     vplayer <- c(vplayer, this_vector)
   }
@@ -453,6 +505,406 @@ player_list <- projections$name %>%
   lineup <- lineup[match(c("CPT", "TOP", "JNG", "MID", "ADC", "SUP", "TEAM"), lineup$lineup_position),]
   
   
+
+```
+
+### Scrape LPL
+```{r scrape-lpl}
+
+#lpl_teams defined previously; if it needs updated, do it manually
+
+for(t in lpl_teams){
+  
+  #t <- lpl_teams[1]
+  url_team <- gsub(" ", "+", t)
+
+url <- gsub(" ", "",paste0("https://lol.fandom.com/wiki/Special:RunQuery/MatchHistoryPlayer?MHP%5Bpreload%5D=General&MHP%5Btournament%5D=LPL+2023+Summer&MHP%5Blink%5D=&MHP%5Bchampion%5D=&MHP%5Brole%5D=&MHP%5Bteam%5D=",url_team,"&MHP%5Bpatch%5D=&MHP%5Byear%5D=&MHP%5Bregion%5D=China&MHP%5Btournamentlevel%5D=&MHP%5Brecord%5D=&MHP%5Brecordorder%5D%5Bis_checkbox%5D=true&MHP%5Bitem%5D=&MHP%5Bjungleitem%5D=&MHP%5Bjungleenchant%5D=&MHP%5Brune%5D=&MHP%5Bchampionvs%5D=&MHP%5Blimit%5D=200&MHP%5Bwhere%5D=&MHP%5Bincludelink%5D%5Bis_checkbox%5D=true&MHP%5Btextonly%5D%5Bis_checkbox%5D=true&MHP%5Btextonly%5D%5Bvalue%5D=&_run=&pfRunQueryFormName=MatchHistoryPlayer&wpRunQuery=&pf_free_text=%3Fformat%3DJSON"))
+content <- GET(url)
+rawContent <- rawToChar(content$content)
+
+htmlTree <- htmlTreeParse(rawContent, useInternalNodes = T)
+
+# title <- xpathSApply(htmlTree, "//*/title", xmlValue)
+# 
+# nodeSet <- getNodeSet(htmlTree, "//*/table")
+# 
+# parseNodeSet <- sapply(nodeSet, FUN = function(ns) xmlValue(ns))
+
+tablehead <- xpathSApply(htmlTree, "//*/th", xmlValue)[2:23] #63 items total, 1 is query description, 2-23 are table info, 24+ are other tables
+results <- xpathSApply(htmlTree, "//*/td", xmlValue)
+
+df <- results[1:22]
+
+for(r in 2:200){
+  df <- rbind(df, results[(r*22-21):(r*22)])
+}
+df <- as.data.frame(df)
+colnames(df) <- tablehead
+df$Team <- t
+df$Player <- sub(" .*", "", df$Player)
+df <- filter(df[,1:18], `W/L` %in% c("Win", "Loss"))
+
+assign(t, df)
+
+if(nrow(all_lpl)==0){
+  all_lpl <- df
+}else{
+  all_lpl <- rbind(all_lpl, df)
+  all_lpl <- unique(all_lpl)
+}
+
+}
+```
+
+
+
+### Scrape LCK
+```{r scrape-lck}
+
+#lck_teams defined previously; if it needs updated, do it manually
+
+#lck_teams <- c("KT Rolster", "Gen.G", "DRX", "Liiv SANDBOX", "Fredit BRION", "DWG KIA", "T1", "Nongshim RedForce", "Hanwha Life Esports", "Kwangdong Freecs")
+for(t in lck_teams){
+  
+  #t <- lpl_teams[1]
+  url_team <- gsub(" ", "+", t)
+
+url <- gsub(" ", "",paste0("https://lol.fandom.com/wiki/Special:RunQuery/MatchHistoryPlayer?MHP%5Bpreload%5D=General&MHP%5Btournament%5D=LCK+2023+Summer&MHP%5Blink%5D=&MHP%5Bchampion%5D=&MHP%5Brole%5D=&MHP%5Bteam%5D=",url_team, "&MHP%5Bpatch%5D=&MHP%5Byear%5D=&MHP%5Bregion%5D=&MHP%5Btournamentlevel%5D=&MHP%5Brecord%5D=&MHP%5Brecordorder%5D%5Bis_checkbox%5D=true&MHP%5Bitem%5D=&MHP%5Bjungleitem%5D=&MHP%5Bjungleenchant%5D=&MHP%5Brune%5D=&MHP%5Bchampionvs%5D=&MHP%5Blimit%5D=200&MHP%5Bwhere%5D=&MHP%5Bincludelink%5D%5Bis_checkbox%5D=true&MHP%5Btextonly%5D%5Bis_checkbox%5D=true&MHP%5Btextonly%5D%5Bvalue%5D=&_run=&pfRunQueryFormName=MatchHistoryPlayer&wpRunQuery=&pf_free_text=%3Fformat%3DJSON"))
+content <- GET(url)
+rawContent <- rawToChar(content$content)
+
+htmlTree <- htmlTreeParse(rawContent, useInternalNodes = T)
+
+# title <- xpathSApply(htmlTree, "//*/title", xmlValue)
+# 
+# nodeSet <- getNodeSet(htmlTree, "//*/table")
+# 
+# parseNodeSet <- sapply(nodeSet, FUN = function(ns) xmlValue(ns))
+
+tablehead <- xpathSApply(htmlTree, "//*/th", xmlValue)[2:23] #63 items total, 1 is query description, 2-23 are table info, 24+ are other tables
+results <- xpathSApply(htmlTree, "//*/td", xmlValue)
+
+df <- results[1:22]
+
+for(r in 2:200){
+  df <- rbind(df, results[(r*22-21):(r*22)])
+}
+df <- as.data.frame(df)
+colnames(df) <- tablehead
+df$Team <- t
+df$Player <- sub(" .*", "", df$Player)
+df <- filter(df[,1:18], `W/L` %in% c("Win", "Loss"))
+
+assign(t, df)
+
+if(nrow(all_lck)==0){
+  all_lck <- df
+}else{
+  all_lck <- rbind(all_lck, df)
+  all_lck <- unique(all_lck)
+}
+
+}
+```
+
+
+
+### Game log data
+```{r game-log}
+
+
+data <- rbind(all_lpl, all_lck)
+
+data$K<- as.numeric(data$K)
+data$D<- as.numeric(data$D)
+data$A<- as.numeric(data$A)
+data$CS<- as.numeric(data$CS)
+data$KDA<- as.numeric(data$KDA)
+data$Date <- date(data$Date)
+data$Player <- case_when(
+  data$Player == "GALA" ~ "Gala",
+  data$Player == "Aki" ~ "AKi",
+  data$Player == "Shanji" ~ "shanji",
+  data$Player == "Bin" ~ "bin",
+  data$Player == "XUN" ~ "Xun",
+  data$Player == "Yuyanjia" ~ "yuyanjia",
+  data$Player == "Huanfeng" ~ "huanfeng",
+  data$Player == "HOYA" ~ "Hoya",
+  data$Player == "Zhiqiuyi" ~ "zhiqiuyi",
+  data$Player == "Pinz" ~ "pinz",
+  data$Player == "Haichao" ~ "haichao",
+  data$Player == "Fearness" ~ "fearness",
+  data$Player == "Xiaolaohu" ~ "xiaolaohu",
+  data$Player == "Invincible" ~ "invincible",
+  data$Player == "Jiejie" ~ "JieJie",
+  data$Player == "ZEKA" ~ "Zeka",
+  data$Player == "Neny" ~ "neny",
+  data$Player == "Beishang" ~ "beishang",
+  data$Player == "Yaoyao" ~ "yaoyao",
+  data$Player == "IBoy" ~ "iBoy",
+  data$Player == "AKi" ~ "Aki",
+
+  
+  T ~ data$Player
+)
+
+data<- data %>%
+  mutate(DKfpts = 3*K + 2*A -D+.02*CS+as.numeric(K>9)*10+as.numeric(A>9)*10) %>%
+  rename(Win = `W/L`)
+
+data$Win <- as.numeric(data$Win == "Win")
+
+data$Len <- period_to_seconds(ms(data$Len))
+data$Len <- data$Len/60
+
+champion_logs <- data %>%
+  group_by(C) %>%
+  summarize(champion_k = mean(K), champion_d = mean(D), champion_a = mean(A), champion_cs = mean(CS), champion_dk = mean(DKfpts), champion_len = mean(Len))
+
+
+
+game_logs <- merge(data, champion_logs)
+
+player_logs <- game_logs %>%
+  group_by(Player) %>%
+  summarize(player_k = mean(K), player_d = mean(D), player_a = mean(A), player_cs = mean(CS), player_dk = mean(DKfpts), player_len = mean(Len))
+
+game_logs <- merge(game_logs, player_logs)
+
+team_logs <- game_logs %>%
+  group_by(Team) %>%
+  summarize(team_k = mean(K),team_d = mean(D), team_a = mean(A), team_cs = mean(CS), team_dk = mean(DKfpts), team_len = mean(Len))
+
+game_logs <- merge(game_logs, team_logs)
+
+
+opp_logs <- game_logs %>%
+  group_by(Vs) %>%
+  summarize(opp_k = mean(K),opp_d = mean(D), opp_a = mean(A), opp_cs = mean(CS), opp_dk = mean(DKfpts), opp_len = mean(Len))
+
+game_logs <- merge(game_logs, opp_logs)
+
+game_logs <- game_logs %>%
+  group_by(Player) %>%
+  slice_head(n=7) %>%
+  ungroup()
+
+lm_k <- lm(K ~ champion_k + player_k + team_k + opp_k + Len, data = game_logs)
+summary(lm_k) #.31
+
+lm_d <- lm(D ~ champion_d + player_d + team_d + opp_d + Len, data = game_logs)
+summary(lm_d) #.20
+
+lm_a <- lm(A ~ champion_a + player_a + team_a + opp_a + Len, data = game_logs)
+summary(lm_a) #.31
+
+lm_cs <- lm(CS ~ champion_cs + player_cs + team_cs + opp_cs + Len, data = game_logs)
+summary(lm_cs) #.92
+
+lm_dk <- lm(DKfpts ~ champion_dk + player_dk + team_dk + opp_dk + Len, data = game_logs)
+summary(lm_dk)#.23
+
+lm_dk_win <- lm(DKfpts ~ champion_dk + player_dk + team_dk + opp_dk + Len + Win, data = game_logs)
+summary(lm_dk_win)#.23
+
+lm_w <- lm(Win ~  team_dk + opp_dk + opp_cs + team_a + opp_a +champion_d + team_d + opp_d + team_k + opp_k, data = game_logs)
+summary(lm_w) #.17
+
+lm_len <- lm(Len ~ champion_len + player_len + team_len + opp_len, data = game_logs)
+summary(lm_len)
+
+match_logs <- game_logs %>%
+  group_by(Date, Player, Team, Vs) %>%
+  summarize(team_dk = mean(team_dk), opp_dk = mean(opp_dk), opp_cs = mean(opp_cs), team_a = mean(team_a), opp_a = mean(opp_a), champion_d = mean(champion_d), team_d = mean(team_d), opp_d = mean(opp_d), team_k = mean(team_k), opp_k = mean(opp_k), Win = sum(Win), games = n())
+
+match_logs$proj_win <- predict(lm_w, match_logs)
+match_logs$win_dif <- match_logs$Win - match_logs$proj_win
+
+player_champion <- game_logs %>%
+  group_by(Player) %>%
+  summarize(champion_k = mean(champion_k), champion_d = mean(champion_d), champion_a = mean(champion_a), champion_cs = mean(champion_cs), champion_len = mean(champion_len), champion_dk = mean(champion_dk))
+
+```
+
+
+### Predict the outcome
+```{r prediction}
+
+#  oprojections <- read_sheet("https://docs.google.com/spreadsheets/d/148yJS9CvZK47qO7ZrVN-t2PnhWNu16MDVD08_vJaP4M/edit#gid=125391630")
+
+  oprojections <- read.csv("C:/Users/jorda/Downloads/DKSalariesLOL.csv")
+  
+  AL <- c("Zdz", "Xiaohao", "Harder", "iBoy", "Zorah")
+  BLG<-c("bin", "Xun", "Yagao", "Elk", "ON")
+  BRO <- c("Morgan", "UmTi", "Ivory", "Hena", "Effort")
+  DK <- c("Canna", "Canyon", "ShowMaker", "Deft", "Kellin")
+  DRX <- c("Rascal", "Croco", "Kyeahoo", "Paduck", "BeryL")
+  EDG <- c("Ale", "Jiejie", "FoFo", "Uzi", "Meiko")
+  FPX <- c("xiaolaohu", "H4cker", "Care", "Lwx", "QiuQiu")
+  GEN <- c("Doran", "Peanut", "Chovy", "Peyz", "Delight")
+  HLE <- c("Kingen", "Clid", "Zeka", "Viper", "Life")
+  IG <- c("YSKM", "Tianzhen", "Cryin", "Ahn", "Wink")
+  JDG <- c("369", "Kanavi", "Knight", "Ruler", "Missing")
+  KDF <- c("DuDu", "YoungJae", "BuLLDoG", "Taeyoon", "Jun")
+  KT <- c("Kiin", "Cuzz", "Bdd", "Aiming", "Lehends")
+  LGD <- c("fearness", "Meteor", "haichao", "Envyy", "Jinjiao")
+  LNG <- c("Zika", "Tarzan", "Scout", "Gala", "Hang")
+  LSB<- c("Burdol", "Willer", "Clozer", "Teddy", "Kael")
+  NIP <- c("invincible", "Shad0w", "Angel" ,"Photic", "Zhuo")
+  NS <- c("DnDn", "Sylvie", "Quad", "Vital", "Peter")
+  OMG <- c("shanji", "Aki", "Creme", "Able", "ppgod")
+  RA <- c("Xiaoxu", "Leyan", "Strive", "Assum", "Feather")
+  RNG <- c("Breathe", "Wei", "Tangyuan", "LP", "LvMao")
+  T1 <- c("Zeus", "Oner", "Faker", "Gumayusi", "Keria")
+  TES <- c("Wayward", "Tian", "Rookie", "JackeyLove", "Mark")
+  TT<- c("Hoya", "Beichuan", "Ucal", "1xn", "yaoyao")
+  UP <- c("Hery", "Ning", "Forge", "Doggo", "SwordArt")
+  WBG <- c("TheShy", "Weiwei", "Xiaohu", "Light", "Crisp")
+  WE <- c("Cube", "Heng", "Shanks", "Hope", "Iwandy")
+ 
+  playing_tonight <-c(UP, EDG, HLE, DK, RNG, AL, KT, KDF, TT, RA)
+
+  projections <- rename(oprojections, Team = TeamAbbrev, Player = Name, salary = Salary)
+  
+  Vs <- c()
+  for(n in 1:nrow(projections)){
+    Vs[n] <- gsub(" .*", "", gsub("@", "", gsub(projections$Team[n], "", projections$Game.Info[n])))
+  }
+
+    
+  projections$Vs <- Vs
+  projections$Player <- gsub(" ", "", projections$Player)
+  
+  tonight_teams <- projections %>%
+    filter(Roster.Position == "TEAM")
+    
+  projections <- filter(projections, Player %in% playing_tonight)
+  projections <- rbind(projections, tonight_teams)
+
+  #projections <- filter(projections, !is.na(Team))
+  
+  for(n in 1:nrow(projections)){
+    
+  projections$Team[n] <- all_teams[c("RNG", "RA", "NIP", "UP", "WBG", "BLG", "TES", "AL", "TT", "LGD", "FPX", "WE", "JDG", "EDG", "LNG", "IG", "OMG", "KT", "GEN", "DRX", "LSB", "BRO", "DK", "T1", "NS", "HLE", "KDF")%in% projections$Team[n]]
+  projections$Vs[n] <- all_teams[c("RNG", "RA", "NIP", "UP", "WBG", "BLG", "TES", "AL", "TT", "LGD", "FPX", "WE", "JDG", "EDG", "LNG", "IG", "OMG", "KT", "GEN", "DRX", "LSB", "BRO", "DK", "T1", "NS", "HLE", "KDF")%in% projections$Vs[n]]
+  
+  }
+
+  projections <- merge(projections, player_champion, all.x = T)
+  projections <- merge(projections, player_logs, all.x = T)
+  projections <- merge(projections, team_logs, all.x = T)
+  projections <- merge(projections, opp_logs, all.x = T)
+
+  projections$win_pct <- predict(lm_w, projections)
+  
+  
+  projections$Len <- predict(lm_len, projections)
+  projections$K <- predict(lm_k, projections)
+  projections$D <- predict(lm_d, projections)
+  projections$A <- predict(lm_a, projections)
+  projections$CS <- predict(lm_cs, projections)
+  
+  projections$DKfpts <- predict(lm_dk, projections)#3*projections$K + 2*projections$A - projections$D + .02*projections$CS
+  projections$slate_games <- length(unique(projections$Team))/2
+  
+  historic_results <- read.csv("C:/Users/jorda/Downloads/Historic Results - LOL.csv")
+  historic_results$Ownership <- as.numeric(gsub("%", "", historic_results$Ownership))
+  historic_results$Ownership <- case_when(
+    historic_results$Ownership > 1 ~ historic_results$Ownership/100,
+    T ~historic_results$Ownership
+  )
+
+  
+  # lm_own <- lm(Ownership ~ salary + win_pct + slate_games, data = historic_results)
+  # summary(lm_own)
+  
+  projections$Ownership <- predict(lm_own, projections)
+  
+  projections$Win <- 1
+  projections$DK_w_win <- predict(lm_dk_win, projections)
+  projections$Win <- 0
+  projections$DK_w_loss <- predict(lm_dk_win, projections)
+  
+  team_wins <- projections %>%
+    group_by(Team, Vs) %>%
+    summarize(Wins = mean(win_pct, na.rm = T), DKfpts = mean(DKfpts, na.rm = T), Ownership = mean(Ownership, na.rm = T), upside = mean(DK_w_win, na.rm = T), downside = mean(DK_w_loss, na.rm = T))
+  
+  opp_wins <- team_wins %>%
+    select(Team, Wins) %>%
+    rename(Vs = Team, Opp_wins = Wins)
+  
+  team_wins <- merge(team_wins, opp_wins)
+  
+  team_wins$Wins <- team_wins$Wins/(team_wins$Wins + team_wins$Opp_wins)
+  
+  team_wins <- select(team_wins, -Opp_wins)
+  
+  
+  
+  display <- projections %>%
+    filter(!Roster.Position == "CPT") %>%
+    select(Player, Team, DK_w_win)
+  
+  # team_wins$Wins <- (team_wins$Wins-mean(team_wins$Wins))/sd(team_wins$Wins)
+  # team_wins$Ownership <- (team_wins$Ownership-mean(team_wins$Ownership))/sd(team_wins$Ownership)
+  # team_wins$Difference <- team_wins$Wins - team_wins$Ownership
+```
+
+### Sim Outcomes
+```{r sim-outcomes}
+
+game_sim <- projections %>%
+  select(Team, Vs, win_pct) %>%
+  group_by(Team, Vs) %>%
+  summarise(Wins = mean(win_pct, na.rm = T))
+
+game_simplify <- as.data.frame(game_sim[1,])
+
+i = 2
+while(nrow(game_simplify)<nrow(game_sim)/2){
+  if(!game_sim$Team[i] %in% game_simplify$Vs){
+    game_simplify <- rbind(game_simplify, game_sim[i,])
+  }
+  i <- i+1
+}
+
+simulations <- 1000
+
+ouse_proj <- projections %>%
+  filter(!is.na(DKfpts), !Roster.Position == "CPT")
+own <- c()
+
+for(n in 1:simulations){
+  use_proj <- ouse_proj
+  game_simplify$outcome <- runif(nrow(game_simplify), 0, 1)
+  game_simplify$Winners <- case_when(game_simplify$outcome > game_simplify$Wins ~ game_simplify$Vs,
+                                     T ~ game_simplify$Team)
+  
+  winners <- game_simplify$Winners
+
+  use_proj$build_proj <- rnorm(nrow(use_proj), mean = case_when(use_proj$Team %in% winners ~ use_proj$DK_w_win, T ~ use_proj$DK_w_loss), sd = 10)
+  
+  use_proj <- use_proj %>%
+    group_by(Roster.Position) %>%
+    slice_max(order_by = build_proj, n = 1, with_ties = F)
+  
+  own <- c(own, use_proj$Player)
+}
+
+own <- as.data.frame(own)
+own$ones <- 1
+
+optimal_chance <- own %>%
+  group_by(own) %>%
+  summarize(percent_optimal = sum(ones)/simulations)
+
+optimal_chance <- rename(optimal_chance, Player = own)
+
+find_ev <- merge(select(ouse_proj, Team, Player, Ownership), optimal_chance)
+
+find_ev$ev <- (find_ev$percent_optimal*(1-find_ev$Ownership) - find_ev$Ownership*(1-find_ev$percent_optimal))
+projections <- merge(projections,find_ev)
+save <- projections # saves in case we need to run optimizer multiple times
 
 ```
 
